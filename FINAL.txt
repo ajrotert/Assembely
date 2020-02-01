@@ -1,0 +1,868 @@
+%include "/usr/local/share/csc314/asm_io.inc"
+
+
+; the file that stores the initial state
+;%define BOARD_FILE 'board1.txt'
+;%define BOARD_FILE 'board.txt'
+%define BOARD_FILE 'board2.txt'
+
+; how to represent everything
+%define WALL_CHAR '|'
+%define CELL_CHAR '_'
+%define PLAYER_CHAR '.'
+
+; the size of the game screen in characters
+; the player starting position.
+; top left is considered (0,0)
+%define STARTX 5
+%define STARTY 2
+
+; these keys do things
+%define EXITCHAR 'L'
+%define UPCHAR 'w'
+%define LEFTCHAR 'a'
+%define DOWNCHAR 's'
+%define RIGHTCHAR 'd'
+
+
+segment .data
+
+        ; used to fopen() the board file defined above
+        board_file                      db BOARD_FILE,0
+
+        ; used to change the terminal mode
+        mode_r                          db "r",0
+        raw_mode_on_cmd         db "stty raw -echo",0
+    raw_mode_off_cmd    db "stty -raw echo",0
+
+        ; called by system() to clear/refresh the screen
+        clear_screen_cmd        db "clear",0
+
+        ; things the program will print
+        help_str1                       db 13,10,"** Control List ** ",13,10, \
+                                                        "Angle: 1-360",13,10,\
+                                                        "Power: 1-100",13,10,\
+                                                        EXITCHAR,"=LEAVE",13, 10,10,10, \
+                                                        "Angle: %d", 13, 10, "Power: %d", 13, 10, 10, 0
+        help_str2                       db 13,10,"** Control List ** ",13,10, \
+                                                        "Angle: 1-360",13,10,\
+                                                        "Power: 1-100",13,10,\
+                                                        EXITCHAR,"=LEAVE",13, 10,10,10, \
+                                                        "Angle: >", 13, 10, "Power: ", 13, 10, 10, 0
+        help_str3                       db 13,10,"** Control List ** ",13,10, \
+                                                        "Angle: 1-360",13,10,\
+                                                        "Power: 1-100",13,10,\
+                                                        EXITCHAR,"=LEAVE",13, 10, 10,10, \
+                                                        "Angle: %d", 13, 10, "Power: >", 13, 10, 10, 0
+        endstr                          db "Hole 1 finished, %d strokes used.", 13, 10, 0
+        inverse   dq 0.0055555555555555555555555555555555555555555555555555
+
+segment .bss
+
+        ; this array stores the current rendered gameboard (HxW)
+        board   resb    17200
+
+        ; these variables store the current player position
+        xpos    resd    1
+        ypos    resd    1
+        xposd   resd    1
+        yposd   resd    1
+        eeax    resd    1       ;anlge
+        eebx    resd    1       ;power (I suck at names)
+        bool    resd    1
+        gctr    resd    1
+        sctr    resd    1
+        result  resq    1
+        endgameflag resd 1
+        effectiveWidth resd 1
+        effectiveHeight resd 1
+        WIDTH resd 1
+        HEIGHT resd 1
+
+segment .text
+
+        global  asm_main
+        global  raw_mode_on
+        global  raw_mode_off
+        global  init_board
+        global  render
+
+        extern  system
+        extern  putchar
+        extern  getchar
+        extern  printf
+        extern  fopen
+        extern  fread
+        extern  fgetc
+        extern  fclose
+        extern  usleep
+
+asm_main:
+        enter   0,0
+        pusha
+        ;***************CODE STARTS HERE***************************
+
+        ; put the terminal in raw mode so the game works nicely
+        call    raw_mode_on
+
+
+        ; set the player at the proper start position
+        mov             DWORD [xpos], STARTX
+        mov             DWORD [ypos], STARTY
+
+        mov dword[xposd], 3
+
+;       mov dword[xposd], 0
+        mov dword[yposd], 0
+        mov dword[sctr], 0
+        mov dword[endgameflag], 0
+
+;       mov dword[WIDTH], 40
+;       mov dword[HEIGHT], 43
+;       mov dword[effectiveHeight], 43
+;       mov dword[effectiveWidth], 9
+;       mov dword[WIDTH], 78
+;       mov dword[HEIGHT], 20
+;       mov dword[effectiveWidth], 76
+;       mov dword[effectiveHeight], 20
+        mov dword[WIDTH], 83
+        mov dword[HEIGHT], 34
+        mov dword[effectiveWidth], 76
+        mov dword[effectiveHeight], 20
+
+        ; read the game board file into the global variable
+        call    init_board
+
+        ; the game happens in this loop
+        ; the steps are...
+        ;   1. render (draw) the current board
+        ;   2. get a character from the user
+        ;       3. store current xpos,ypos in esi,edi
+        ;       4. update xpos,ypos based on character from user
+        ;       5. check what's in the buffer (board) at new xpos,ypos
+        ;       6. if it's a wall, reset xpos,ypos to saved esi,edi
+        ;       7. otherwise, just continue! (xpos,ypos are ok)
+        next_putt:
+        mov dword[eeax], 0
+        mov dword[eebx], -1
+        mov dword[bool], 1
+        inc dword[sctr]
+        game_loop:
+                ; draw the game board
+                call    render
+                cmp dword[endgameflag], 1
+                je game_loop_end
+
+                ; store the current position
+                ; we will test if the new position is legal
+                ; if not, we will restore these
+;               mov             esi, dword[xpos]
+;               mov             edi, dword[ypos]
+
+                cmp dword[bool], 1
+                jne     continue_game_loop
+
+                ; get an action from the user
+                call    getchar
+
+                ; choose what to do
+                cmp             eax, EXITCHAR
+                je              game_loop_end
+                cmp             eax, UPCHAR
+                je              changing_NL
+                cmp             eax, LEFTCHAR
+                je              changing_NL
+                cmp             eax, DOWNCHAR
+                je              changing_NL
+                cmp             eax, RIGHTCHAR
+                je              changing_NL
+                cmp     esi, 1
+
+;               GETTING NUMBERS
+                call valid_number
+                cmp ebx, 1
+                je changing_help
+
+;               GETTING NEWLINE
+                cmp eax, 10
+                je changing_NL
+;               I dont think that this works, need to use wasd keys
+
+                jmp             input_end                       ; or just do nothing
+
+                ; move the player according to the input character
+                move_up:
+        ;               dec             DWORD [ypos]
+                        jmp             input_end
+                move_left:
+        ;               dec             DWORD [xpos]
+                        jmp             input_end
+                move_down:
+        ;               inc             DWORD [ypos]
+                        jmp             input_end
+                move_right:
+        ;               inc             DWORD [xpos]
+                        jmp     input_end
+
+
+
+
+                changing_help:
+                        cmp dword[eebx], 0
+                        jge  eebx_change
+                        mov ebx, eax
+                        mov eax, dword[eeax]
+                        imul eax, 10
+                        mov dword[eeax], eax
+;                       imul dword[eeax], 10
+;                       Line above doesn't work, but thats the idea
+                        add dword[eeax], ebx
+;                       mov dword[eebx], -1
+                        jmp input_end
+                        eebx_change:
+                        mov ebx, eax
+                        mov eax, dword[eebx]
+                        imul eax, 10
+                        mov dword[eebx], eax
+                        add dword[eebx], ebx
+                        jmp input_end
+
+                changing_NL:
+                        cmp dword[eebx], -1
+                        jne start_game_loop
+;                       Indecates that the user wants to go from angle to power
+                        mov dword[eebx], 0
+
+                input_end:
+
+                ; (W * y) + x = pos
+                cmp dword[eeax], 360
+                jg change_back_eeax
+                jmp next_check_GLE
+                change_back_eeax:
+                mov dword[eeax], 0
+                next_check_GLE:
+                cmp dword[eebx], 100
+                jle game_loop
+                mov dword[eebx], 0
+        jmp game_loop
+        continue_game_loop:
+
+                mov eax, dword[WIDTH]
+                imul eax, dword[ypos]
+                add eax, dword[xpos]
+                cmp byte[board+eax], '#'
+                jne no_rough
+                add dword[gctr], 10
+                no_rough:
+
+
+                ; compare the current position to the wall character
+                mov             eax, dword[WIDTH]
+                mul             DWORD [ypos]
+                add             eax, [xpos]
+                lea             eax, [board + eax]
+                cmp             BYTE [eax], WALL_CHAR
+                jne             valid_check
+                jmp past
+                valid_check:
+                cmp byte[eax], CELL_CHAR
+                jne valid_move
+                past:
+;               INVALID MOVE HANDLING HERE
+;               jne             valid_move
+                        ; opps, that was an invalid move, reset
+;                       mov             DWORD [xpos], esi
+;                       mov             DWORD [ypos], edi
+;                       dec     dword[ypos]
+;                       dec             dword[ypos]
+                valid_move:
+                call Is_Valid_Move
+
+        mov eax, dword[eebx]
+        cmp eax, dword[gctr]
+        jg continue_game_loop_end
+;       putting loop ends
+        jmp next_putt
+        continue_game_loop_end:
+        mov eax, dword[gctr]
+        mov ebx, dword[eebx]
+        cmp eax, ebx
+        jge push_slower
+        mov eax, 100000
+        jmp push_eax
+        push_slower:
+        mov eax, 300000
+        push_eax:
+        push eax
+        call usleep
+        add esp, 4
+;       VALID MOVE HERE
+        ;I need to add +-1 to x and y
+        call Find_X
+        call Find_Y
+        mov eax, dword[xpos]
+        add eax, dword[xposd]
+        mov dword[xpos], eax
+        mov ebx, dword[ypos]
+        sub ebx, dword[yposd]
+        mov dword[ypos], ebx
+
+        fild dword[yposd]
+        fabs
+        fistp dword[yposd]
+        mov eax, dword[yposd]
+        cmp eax, 0
+        jg add_ctr
+        mov eax, 1
+        add_ctr:
+        add dword[gctr], eax
+
+        jmp game_loop
+        start_game_loop:
+        mov dword[bool], -1
+        mov dword[gctr], 0
+        mov dword[xposd], 3
+
+        jmp             game_loop
+        game_loop_end:
+
+        cmp dword[endgameflag], 1
+        jne end_end
+        call Win
+        end_end:
+
+        ; restore old terminal functionality
+        call raw_mode_off
+
+        ;***************CODE ENDS HERE*****************************
+        popa
+        mov             eax, 0
+        leave
+        ret
+
+; === FUNCTION ===
+raw_mode_on:
+
+        push    ebp
+        mov             ebp, esp
+
+        push    raw_mode_on_cmd
+        call    system
+        add             esp, 4
+
+        mov             esp, ebp
+        pop             ebp
+        ret
+
+; === FUNCTION ===
+raw_mode_off:
+
+        push    ebp
+        mov             ebp, esp
+
+        push    raw_mode_off_cmd
+        call    system
+        add             esp, 4
+
+        mov             esp, ebp
+        pop             ebp
+        ret
+
+; === FUNCTION ===
+init_board:
+
+        push    ebp
+        mov             ebp, esp
+
+        ; FILE* and loop counter
+        ; ebp-4, ebp-8
+        sub             esp, 8
+
+        ; open the file
+        push    mode_r
+        push    board_file
+        call    fopen
+        add             esp, 8
+        mov             DWORD [ebp-4], eax
+
+        ; read the file data into the global buffer
+        ; line-by-line so we can ignore the newline characters
+        mov             DWORD [ebp-8], 0
+        read_loop:
+        mov eax, dword [HEIGHT]
+        cmp             DWORD [ebp-8], eax
+        je              read_loop_end
+
+                ; find the offset (WIDTH * counter)
+                mov             eax, dword[WIDTH]
+                mul             DWORD [ebp-8]
+                lea             ebx, [board + eax]
+
+                ; read the bytes into the buffer
+                push    DWORD [ebp-4]
+                push    dword[WIDTH]
+                push    1
+                push    ebx
+                call    fread
+                add             esp, 16
+
+                ; slurp up the newline
+                push    DWORD [ebp-4]
+                call    fgetc
+                add             esp, 4
+
+        inc             DWORD [ebp-8]
+        jmp             read_loop
+        read_loop_end:
+
+        ; close the open file handle
+        push    DWORD [ebp-4]
+        call    fclose
+        add             esp, 4
+
+        mov             esp, ebp
+        pop             ebp
+        ret
+
+; === FUNCTION ===
+render:
+
+        push    ebp
+        mov             ebp, esp
+
+        ; two ints, for two loop counters
+        ; ebp-4, ebp-8
+        sub             esp, 8
+
+        ; clear the screen
+        push    clear_screen_cmd
+        call    system
+        add             esp, 4
+
+        ; print the help information
+;       push    help_str
+;       call    printf
+;       add             esp, 4
+        mov eax, dword[eeax]
+        mov ebx, dword[eebx]
+        call help_str
+
+        ; outside loop by height
+        ; i.e. for(c=0; c<height; c++)
+        mov             DWORD [ebp-4], 0
+        y_loop_start:
+        mov ecx, dword[HEIGHT]
+        cmp             DWORD [ebp-4], ecx
+        je              y_loop_end
+
+                ; inside loop by width
+                ; i.e. for(c=0; c<width; c++)
+                mov             DWORD [ebp-8], 0
+                x_loop_start:
+                mov ecx, dword[WIDTH]
+                cmp             DWORD [ebp-8], ecx
+                je              x_loop_end
+
+                        ; check if (xpos,ypos)=(x,y)
+                        mov             eax, [xpos]
+                        cmp             eax, DWORD [ebp-8]
+                        jne             print_board
+                        mov             eax, [ypos]
+                        cmp             eax, DWORD [ebp-4]
+                        jne             print_board
+                                ; if both were equal, print the player
+                        ;(W * y) + x = pos
+                        mov eax, dword[WIDTH]
+                        imul eax, dword[ebp-4]
+                        add eax, dword[ebp-8]
+                        cmp byte[board+eax], 'O'
+                        je end_game_here
+
+                                push    PLAYER_CHAR
+                                jmp             print_end
+                        end_game_here:
+                                mov dword[endgameflag], 1
+                                push '0'
+                                jmp print_end
+                        print_board:
+                                ; otherwise print whatever's in the buffer
+                                mov             eax, [ebp-4]
+                                mov             ebx, dword[WIDTH]
+                                mul             ebx
+                                add             eax, [ebp-8]
+                                mov             ebx, 0
+                                mov             bl, BYTE [board + eax]
+                                push    ebx
+                        print_end:
+                        call    putchar
+                        add             esp, 4
+
+                inc             DWORD [ebp-8]
+                jmp             x_loop_start
+                x_loop_end:
+
+                ; write a carriage return (necessary when in raw mode)
+                push    0x0d
+                call    putchar
+                add             esp, 4
+
+                ; write a newline
+                push    0x0a
+                call    putchar
+                add             esp, 4
+
+        inc             DWORD [ebp-4]
+        jmp             y_loop_start
+        y_loop_end:
+
+        mov             esp, ebp
+        pop             ebp
+        ret
+
+valid_number:
+        push    ebp
+        mov             ebp, esp
+        sub eax, 48
+        cmp eax, 0
+        jge next_check
+
+        jmp nonvalid_check_number
+        next_check:
+        cmp eax, 9
+        jle valid_check_number
+
+        jmp nonvalid_check_number
+        valid_check_number:
+        mov ebx, 1
+
+        jmp over1
+        nonvalid_check_number:
+        mov ebx, 0
+        over1:
+        mov             esp, ebp
+        pop             ebp
+        ret
+
+help_str:
+        push    ebp
+        mov             ebp, esp
+
+        cmp eax, 0
+        je print_here
+        cmp ebx, 0
+        je print2_here
+
+        push    ebx
+        push    eax
+        push    help_str1
+        call    printf
+        add             esp, 12
+
+        jmp over3
+        print_here:
+        push    help_str2
+        call    printf
+        add             esp, 4
+
+        jmp over3
+        print2_here:
+        push    eax
+        push    help_str3
+        call    printf
+        add             esp, 8
+
+        over3:
+
+        mov             esp, ebp
+        pop             ebp
+        ret
+Find_X:
+        push ebp
+        mov ebp, esp
+
+
+;       cmp dword[eeax], 90
+;       jl positive_x
+;       cmp dword[eeax],270
+;       jg positive_x
+;       mov dword[xposd], -3
+;       jmp over4
+;       positive_x:
+;       mov dword[xposd], 3
+;       over4:
+
+
+;       cmp dword[eeax], 0
+;       jge POSITIVE
+;       jmp NEGATIVE
+;       POSITIVE:
+        cmp dword[eeax], 90
+        jl positive_x
+        cmp dword[eeax],270
+        jg positive_x
+        cmp dword[xposd], 0
+        jg change_n
+        mov ebx, 1
+        jmp over4
+        change_n:
+        mov ebx, -1
+
+        jmp over4
+        positive_x:
+        mov ebx, 1
+        over4:
+
+        mov eax, dword[xposd]
+        imul eax, ebx
+        mov dword[xposd], eax
+
+;       jmp X_END
+;       NEGATIVE:
+;       mov eax, dword[eeax]
+;       add eax, 360
+
+;       cmp dword[eeax], 90
+;       jl negative_x
+;       cmp dword[eeax],270
+;       jg negative_x
+;       mov dword[xposd], 3
+;       jmp X_END
+;       negative_x:
+;       mov dword[xposd], -3
+
+        mov eax, dword[xpos]
+        cmp eax, 1
+        jg not_left
+        ;left
+        mov eax, dword[xposd]
+        imul eax, -1
+        mov dword[xposd], eax
+
+        not_left:
+        ;right
+        mov ebx, dword[effectiveWidth]
+        cmp eax, ebx
+        jl not_right
+        mov eax, dword[xposd]
+        imul eax, -1
+        mov dword[xposd], eax
+
+        not_right:
+        ;top
+        mov eax, dword[ypos]
+        mov ebx, 0
+        cmp eax, ebx
+        jg not_top
+        mov eax, dword[xposd]
+        imul eax, -1
+        mov dword[xposd], eax
+
+        not_top:
+        ;bottom
+        mov ebx, dword[effectiveHeight]
+        cmp eax, ebx
+        jle X_END
+
+        mov eax, dword[xposd]
+        imul eax, -1
+        mov dword[xposd], eax
+
+
+
+;       cmp dword[eeax], 0
+;       jge POSITIVE
+;       jmp NEGATIVE
+;       POSITIVE:
+;       cmp dword[eeax], 90
+;       jl positive_x
+;       cmp dword[eeax],270
+;       jg positive_x
+;       mov dword[xposd], -3
+;       jmp over4
+;       positive_x:
+;       mov dword[xposd], 3
+;       over4:
+;       jmp X_END
+;       NEGATIVE:
+;       mov eax, dword[eeax]
+;       add eax, 360
+;
+;       cmp dword[eeax], 90
+;       jl negative_x
+;       cmp dword[eeax],270
+;       jg negative_x
+;       mov dword[xposd], -3
+;       jmp X_END
+;       negative_x:
+;       mov dword[xposd], 3
+
+        X_END:
+        mov esp, ebp
+        pop ebp
+        ret
+
+Find_Y:
+        push    ebp
+        mov     ebp, esp
+
+        cmp dword[eeax], 90
+        jne tanget_next
+        jmp tanget_plus
+        tanget_next:
+        cmp dword[eeax], 270
+        jne tanget
+        jmp tanget_minus
+
+        tanget:
+;x*tan(pi*angle/180)
+     fldpi               ;load PI onto the stack
+     fstp qword[result]  ;store and pop the result in a quad word
+
+     fild dword[eeax]   ;load the angle on to the stack(i for integer)
+     fmul qword [inverse];multiply the angle by the inverse of 180 (couldn't figure out divide)
+     fmul qword [result] ;multiply the result by pi(poor variable name, qword result is pi)
+
+     fptan               ;find the tanget of this
+     fstp qword[result]  ;pop 1 off the floating point stack
+     fstp qword[result]  ;store results as integer(i is needed here)
+     fld qword[result]   ;store float
+     fimul dword[xposd]   ;integer multiplication
+     fistp dword[yposd]   ;integer store
+
+        jmp tanget_end
+
+        tanget_plus:
+        mov dword[yposd], 1
+        mov dword[xposd], 0
+        jmp tanget_end
+        tanget_minus:
+        mov dword[yposd], -1
+        mov dword[xposd], 0
+        jmp tanget_end
+
+        tanget_end:
+
+
+         mov esp, ebp
+         pop    ebp
+         ret
+Is_Valid_Move:
+        push ebp
+        mov ebp, esp
+
+        ;Wall left
+        mov eax, dword[xpos]
+        cmp eax, 1
+        jg next_WR
+        add dword[xpos],1
+        mov ebx, 180
+        sub ebx, dword[eeax]
+        mov dword[eeax], ebx
+        jmp next_End
+        next_WR:
+        ;Wall right
+        mov ecx, dword[effectiveWidth]
+        mov ebx, ecx
+        cmp eax, ebx
+        jl next_WT
+        add dword[xpos], -1
+        mov ebx, 180
+        sub ebx, dword[eeax]
+        mov dword[eeax], ebx
+        jmp next_End
+        next_WT:
+        mov eax, dword[ypos]
+        cmp eax, 1
+        jg next_BT
+        add dword[ypos], 1
+        mov ebx, 180
+        cmp dword[eeax], 90
+        jne change_angle
+        mov dword[eeax], 270
+        jmp next_BT
+        change_angle:
+        sub ebx, dword[eeax]
+        mov dword[eeax], ebx
+        jmp next_End
+        next_BT:
+        ;Bottom
+        mov eax, dword[ypos]
+        mov ebx, dword[effectiveHeight]
+        sub ebx, 2
+        cmp eax, ebx
+        jl next_End
+        add dword[ypos], -1
+        mov ebx, 180
+        cmp dword[eeax], 270
+        jne change_angle_1
+        mov dword[eeax], 90
+        jmp next_End
+        change_angle_1:
+        sub ebx, dword[eeax]
+        mov dword[eeax], ebx
+
+        next_End:
+
+;       cmp dword[eeax], 0
+;       jg very_end
+;       mov eax, 360
+;       mov ebx, dword[eeax]
+;       add ebx, eax
+;       mov dword[eeax], ebx
+
+        very_end:
+
+;       mov eax, dword[xpos]
+;       cmp eax, 1
+;       jg not_left
+
+;       not_left:
+        ;right
+;       mov ebx, dword[effectiveWidth]
+;       cmp eax, ebx
+;       jl not_right
+;       mov eax, dword[xposd]
+;       imul eax, 1
+;       mov dword[xposd], eax
+
+;       not_right:
+        ;top
+;       mov eax, dword[ypos]
+;       mov ebx, 0
+;       cmp eax, ebx
+;       jg not_top
+;       mov eax, dword[xposd]
+;       imul eax, 1
+;       mov dword[xposd], eax
+
+;       not_top:
+        ;bottom
+;       mov ebx, dword[effectiveHeight]
+;       cmp eax, ebx
+;       jle X_END
+
+;       mov eax, dword[xposd]
+;       imul eax, 1
+;       mov dword[xposd], eax
+
+
+
+
+
+        mov esp, ebp
+        pop ebp
+        ret
+Win:
+        push ebp
+        mov ebp, esp
+
+        call raw_mode_off
+
+        ; print endstr
+        push dword[sctr]
+        push endstr
+        call printf
+
+        mov esp, ebp
+        pop ebp
